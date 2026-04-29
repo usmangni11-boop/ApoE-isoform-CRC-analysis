@@ -1,0 +1,315 @@
+---
+title: "Publication-Quality Figures — APOE Isoform CRC Analysis"
+author: "Ghani"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    code_folding: show
+    fig_width: 8
+    fig_height: 6
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  warning    = FALSE,
+  message    = FALSE,
+  fig.align  = "center",
+  dpi        = 300
+)
+
+library(yaml)
+params <- read_yaml("../config/params.yaml")
+
+# Output directory for figures
+fig_dir <- "../results/figures/"
+if (!dir.exists(fig_dir)) dir.create(fig_dir, recursive = TRUE)
+```
+
+# 0. Global Theme & Palette
+
+```{r global-theme}
+library(tidyverse)
+library(ggpubr)
+library(survminer)
+library(ComplexHeatmap)
+library(circlize)
+library(RColorBrewer)
+library(patchwork)
+
+# Isoform color palette from params.yaml
+iso_colors <- c(
+  "e2" = params$figures$color_palette$e2,
+  "e3" = params$figures$color_palette$e3,
+  "e4" = params$figures$color_palette$e4
+)
+
+# Publication theme
+theme_pub <- theme_classic(base_size = 14) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle    = element_text(size = 12, hjust = 0.5, color = "grey40"),
+    axis.title       = element_text(face = "bold"),
+    legend.position  = "bottom",
+    legend.title     = element_text(face = "bold"),
+    strip.background = element_rect(fill = "grey95", color = NA),
+    strip.text       = element_text(face = "bold")
+  )
+
+theme_set(theme_pub)
+```
+
+---
+
+# 1. Load Processed Data
+
+```{r load-data}
+clinical  <- read_csv(file.path(params$paths$processed_data, "clinical_with_isoforms.csv"))
+expr      <- read_csv(file.path(params$paths$processed_data, "expression_normalized.csv"))
+immune    <- read_csv(file.path(params$paths$processed_data, "immune_infiltration.csv"))
+mutations <- read_csv(file.path(params$paths$processed_data, "mutation_summary.csv"))
+deg       <- read_csv(file.path(params$paths$results_tables, "deg_results.csv"))
+gsea      <- read_csv(file.path(params$paths$results_tables, "gsea_results.csv"))
+```
+
+---
+
+# 2. Figure 1 — APOE Isoform Distribution
+
+```{r fig1-isoform-dist, fig.width=6, fig.height=5}
+fig1 <- clinical %>%
+  count(apoe_isoform) %>%
+  mutate(
+    pct   = n / sum(n) * 100,
+    label = sprintf("%d\n(%.1f%%)", n, pct)
+  ) %>%
+  ggplot(aes(x = reorder(apoe_isoform, -n), y = n, fill = apoe_isoform)) +
+  geom_col(width = 0.6, color = "black", linewidth = 0.3) +
+  geom_text(aes(label = label), vjust = -0.3, size = 4) +
+  scale_fill_manual(values = iso_colors) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(
+    title = "APOE Isoform Distribution in TCGA CRC",
+    x     = "APOE Isoform Group",
+    y     = "Number of Patients"
+  ) +
+  theme(legend.position = "none")
+
+fig1
+ggsave(file.path(fig_dir, "Fig1_isoform_distribution.pdf"), fig1, width = 6, height = 5)
+ggsave(file.path(fig_dir, "Fig1_isoform_distribution.png"), fig1, width = 6, height = 5)
+```
+
+---
+
+# 3. Figure 2 — Volcano Plot (DEGs)
+
+```{r fig2-volcano, fig.width=8, fig.height=6}
+fig2 <- deg %>%
+  mutate(
+    significance = case_when(
+      padj < params$deg_thresholds$padj & log2FoldChange >  params$deg_thresholds$log2fc ~ "Up",
+      padj < params$deg_thresholds$padj & log2FoldChange < -params$deg_thresholds$log2fc ~ "Down",
+      TRUE ~ "NS"
+    )
+  ) %>%
+  ggplot(aes(x = log2FoldChange, y = -log10(padj), color = significance)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  geom_vline(xintercept = c(-params$deg_thresholds$log2fc, params$deg_thresholds$log2fc),
+             linetype = "dashed", color = "grey50") +
+  geom_hline(yintercept = -log10(params$deg_thresholds$padj),
+             linetype = "dashed", color = "grey50") +
+  scale_color_manual(
+    values = c("Up" = "#E74C3C", "Down" = "#3498DB", "NS" = "grey80"),
+    name   = "Regulation"
+  ) +
+  labs(
+    title = "Differential Gene Expression by APOE Isoform",
+    x     = expression(log[2]~"Fold Change"),
+    y     = expression(-log[10]~"adjusted p-value")
+  )
+
+fig2
+ggsave(file.path(fig_dir, "Fig2_volcano_plot.pdf"), fig2, width = 8, height = 6)
+ggsave(file.path(fig_dir, "Fig2_volcano_plot.png"), fig2, width = 8, height = 6)
+```
+
+---
+
+# 4. Figure 3 — Immune Infiltration Boxplots
+
+```{r fig3-immune, fig.width=10, fig.height=7}
+immune_long <- immune %>%
+  left_join(clinical %>% select(sample_id, apoe_isoform), by = "sample_id") %>%
+  pivot_longer(
+    cols      = -c(sample_id, apoe_isoform),
+    names_to  = "cell_type",
+    values_to = "fraction"
+  ) %>%
+  filter(cell_type %in% params$immune$cell_types)
+
+fig3 <- ggboxplot(
+  immune_long,
+  x       = "apoe_isoform",
+  y       = "fraction",
+  fill    = "apoe_isoform",
+  palette = iso_colors,
+  facet.by = "cell_type",
+  scales   = "free_y",
+  add      = "jitter",
+  add.params = list(alpha = 0.2, size = 0.8)
+) +
+  stat_compare_means(method = "kruskal.test", label = "p.format", size = 3.5) +
+  labs(
+    title = "Immune Cell Infiltration by APOE Isoform",
+    x     = "APOE Isoform",
+    y     = "Estimated Fraction"
+  ) +
+  theme(legend.position = "none")
+
+fig3
+ggsave(file.path(fig_dir, "Fig3_immune_infiltration.pdf"), fig3, width = 10, height = 7)
+ggsave(file.path(fig_dir, "Fig3_immune_infiltration.png"), fig3, width = 10, height = 7)
+```
+
+---
+
+# 5. Figure 4 — TMB by Isoform
+
+```{r fig4-tmb, fig.width=6, fig.height=5}
+fig4 <- mutations %>%
+  left_join(clinical %>% select(sample_id, apoe_isoform), by = "sample_id") %>%
+  ggplot(aes(x = apoe_isoform, y = tmb, fill = apoe_isoform)) +
+  geom_violin(alpha = 0.7, color = "black", linewidth = 0.3) +
+  geom_boxplot(width = 0.15, fill = "white", outlier.shape = NA) +
+  scale_fill_manual(values = iso_colors) +
+  scale_y_log10() +
+  stat_compare_means(method = "kruskal.test", label.y.npc = 0.95) +
+  labs(
+    title = "Tumor Mutational Burden by APOE Isoform",
+    x     = "APOE Isoform",
+    y     = "TMB (mutations / Mb, log scale)"
+  ) +
+  theme(legend.position = "none")
+
+fig4
+ggsave(file.path(fig_dir, "Fig4_tmb_violin.pdf"), fig4, width = 6, height = 5)
+ggsave(file.path(fig_dir, "Fig4_tmb_violin.png"), fig4, width = 6, height = 5)
+```
+
+---
+
+# 6. Figure 5 — Pathway Enrichment Dot Plot
+
+```{r fig5-gsea, fig.width=9, fig.height=7}
+fig5 <- gsea %>%
+  filter(padj < params$pathway$fdr_threshold) %>%
+  mutate(pathway = fct_reorder(pathway, NES)) %>%
+  ggplot(aes(x = NES, y = pathway, size = -log10(padj), color = NES)) +
+  geom_point() +
+  scale_color_gradient2(
+    low  = "#3498DB",
+    mid  = "grey90",
+    high = "#E74C3C",
+    midpoint = 0,
+    name = "NES"
+  ) +
+  scale_size_continuous(name = expression(-log[10]~"FDR"), range = c(2, 8)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  labs(
+    title = "Hallmark Pathway Enrichment (GSEA)",
+    x     = "Normalized Enrichment Score (NES)",
+    y     = NULL
+  )
+
+fig5
+ggsave(file.path(fig_dir, "Fig5_gsea_dotplot.pdf"), fig5, width = 9, height = 7)
+ggsave(file.path(fig_dir, "Fig5_gsea_dotplot.png"), fig5, width = 9, height = 7)
+```
+
+---
+
+# 7. Figure 6 — Kaplan-Meier Survival Curves
+
+```{r fig6-km-os, fig.width=8, fig.height=6}
+fit_os <- survfit(Surv(OS.time, OS) ~ apoe_isoform, data = clinical)
+
+fig6 <- ggsurvplot(
+  fit_os,
+  data          = clinical,
+  pval          = TRUE,
+  pval.method   = TRUE,
+  risk.table    = TRUE,
+  risk.table.height = 0.25,
+  palette       = iso_colors,
+  linetype      = "solid",
+  surv.median.line = "hv",
+  xlab          = "Time (days)",
+  ylab          = "Overall Survival Probability",
+  title         = "Overall Survival by APOE Isoform",
+  legend.title  = "APOE Isoform",
+  ggtheme       = theme_pub
+)
+
+fig6
+pdf(file.path(fig_dir, "Fig6_km_os.pdf"), width = 8, height = 6)
+print(fig6)
+dev.off()
+png(file.path(fig_dir, "Fig6_km_os.png"), width = 8, height = 6, units = "in", res = 300)
+print(fig6)
+dev.off()
+```
+
+---
+
+# 8. Figure 7 — Kaplan-Meier (DFS)
+
+```{r fig7-km-dfs, fig.width=8, fig.height=6}
+fit_dfs <- survfit(Surv(DFS.time, DFS) ~ apoe_isoform, data = clinical)
+
+fig7 <- ggsurvplot(
+  fit_dfs,
+  data          = clinical,
+  pval          = TRUE,
+  pval.method   = TRUE,
+  risk.table    = TRUE,
+  risk.table.height = 0.25,
+  palette       = iso_colors,
+  xlab          = "Time (days)",
+  ylab          = "Disease-Free Survival Probability",
+  title         = "Disease-Free Survival by APOE Isoform",
+  legend.title  = "APOE Isoform",
+  ggtheme       = theme_pub
+)
+
+fig7
+pdf(file.path(fig_dir, "Fig7_km_dfs.pdf"), width = 8, height = 6)
+print(fig7)
+dev.off()
+png(file.path(fig_dir, "Fig7_km_dfs.png"), width = 8, height = 6, units = "in", res = 300)
+print(fig7)
+dev.off()
+```
+
+---
+
+# 9. Composite Panel (Figures 1 + 4 + 6)
+
+```{r fig-composite, fig.width=14, fig.height=5}
+composite <- fig1 + fig4 + plot_annotation(tag_levels = "A")
+composite
+ggsave(file.path(fig_dir, "Fig_composite_panel.pdf"), composite, width = 14, height = 5)
+ggsave(file.path(fig_dir, "Fig_composite_panel.png"), composite, width = 14, height = 5)
+```
+
+---
+
+# 10. Session Info
+
+```{r session-info}
+sessionInfo()
+```
