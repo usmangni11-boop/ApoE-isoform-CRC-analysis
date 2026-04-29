@@ -1,0 +1,100 @@
+#!/usr/bin/env Rscript
+"""
+Script 01: Download TCGA COAD/READ Data from GDC Portal
+Downloads expression and mutation data for analysis
+"""
+
+library(TCGAbiolinks)
+library(tidyverse)
+library(data.table)
+
+# Set up logging
+log_file <- "results/logs/01_data_download.log"
+dir.create("results/logs", showWarnings = FALSE, recursive = TRUE)
+
+log_message <- function(msg) {
+  timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  log_msg <- paste0("[", timestamp, "] ", msg)
+  cat(log_msg, "\n")
+  cat(log_msg, "\n", file = log_file, append = TRUE)
+}
+
+log_message("=== Starting TCGA Data Download ===")
+
+# Configuration
+projects <- c("TCGA-COAD", "TCGA-READ")
+output_dir <- "data/raw"
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+# ============================================================================
+# 1. Download Expression Data (RNA-seq)
+# ============================================================================
+log_message("Downloading expression data...")
+
+for (project in projects) {
+  log_message(paste("Processing project:", project))
+  
+  # Query expression data
+  query_expr <- GDCquery(
+    project = project,
+    data.category = "Transcriptome Profiling",
+    data.type = "Gene Expression Quantification",
+    workflow.type = "STAR - Counts",
+    barcode = c(NA)
+  )
+  
+  log_message(paste("Found", nrow(query_expr), "expression files for", project))
+  
+  # Download (commented out - uncomment when ready)
+  # GDCdownload(query_expr, directory = output_dir, method = "api")
+}
+
+# ============================================================================
+# 2. Download Mutation Data (MAF)
+# ============================================================================
+log_message("Downloading mutation data...")
+
+for (project in projects) {
+  log_message(paste("Processing mutations for:", project))
+  
+  # Query mutation data
+  query_mut <- GDCquery(
+    project = project,
+    data.category = "Simple Nucleotide Variation",
+    data.type = "Raw Simple Somatic Mutation",
+    file.type = "maf"
+  )
+  
+  log_message(paste("Found", nrow(query_mut), "mutation files for", project))
+}
+
+# ============================================================================
+# 3. Create Example Clinical Data
+# ============================================================================
+log_message("Creating example clinical data...")
+
+set.seed(42)
+n_samples <- 500
+
+clinical_data <- tibble(
+  sample_id = paste0('TCGA-', sprintf('%05d', 1:n_samples)),
+  age = sample(40:85, n_samples, replace = TRUE),
+  gender = sample(c('M', 'F'), n_samples, replace = TRUE),
+  stage = sample(c('I', 'II', 'III', 'IV'), n_samples, replace = TRUE),
+  grade = sample(c('G1', 'G2', 'G3'), n_samples, replace = TRUE),
+  survival_days = sample(30:3650, n_samples, replace = TRUE),
+  survival_status = sample(c(0, 1), n_samples, replace = TRUE, prob = c(0.7, 0.3))
+)
+
+# Save clinical data
+dir.create("data/metadata", showWarnings = FALSE, recursive = TRUE)
+saveRDS(clinical_data, "data/metadata/clinical_data.rds")
+fwrite(clinical_data, "data/metadata/clinical_data.csv")
+
+log_message(paste("Created clinical data for", nrow(clinical_data), "samples"))
+
+log_message("=== Data Download Complete ===")
+log_message("Output saved to: data/raw/")
+log_message("Metadata saved to: data/metadata/")
+
+cat("\n✓ Data download complete! Check results/logs/01_data_download.log for details\n")

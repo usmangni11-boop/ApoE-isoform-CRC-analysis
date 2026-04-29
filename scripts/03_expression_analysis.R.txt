@@ -1,0 +1,199 @@
+#!/usr/bin/env Rscript
+"""
+Script 03: APOE Expression Analysis
+Analyzes APOE expression by isoform and identifies co-expressed genes
+"""
+
+library(tidyverse)
+library(limma)
+library(edgeR)
+library(data.table)
+library(yaml)
+
+log_message <- function(msg) {
+  timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  cat(paste0("[", timestamp, "] ", msg, "\n"))
+}
+
+log_message("=== Starting APOE Expression Analysis ===")
+
+# Load configuration
+config <- read_yaml('config/config.yaml')
+
+# ============================================================================
+# 1. Load APOE Genotypes
+# ============================================================================
+log_message("Loading APOE genotype data...")
+
+apoe_genotypes <- readRDS('data/processed/apoe_genotypes.rds')
+
+log_message(paste("Loaded genotypes for", nrow(apoe_genotypes), "samples"))
+
+# ============================================================================
+# 2. Create Example Expression Data
+# ============================================================================
+log_message("Creating example expression matrix...")
+
+set.seed(42)
+n_genes <- 20000
+n_samples <- nrow(apoe_genotypes)
+
+# Create expression matrix
+expr_data <- matrix(
+  rnorm(n_genes * n_samples, mean = 5, sd = 2),
+  nrow = n_genes,
+  ncol = n_samples
+)
+
+rownames(expr_data) <- paste0('GENE_', 1:n_genes)
+colnames(expr_data) <- apoe_genotypes$sample_id
+
+# Make GENE_1 as APOE with higher expression
+expr_data[1, ] <- rnorm(n_samples, mean = 7, sd = 1.5)
+
+log_message(paste("Created expression matrix:", nrow(expr_data), "genes x", ncol(expr_data), "samples"))
+
+# ============================================================================
+# 3. Normalize Expression Data
+# ============================================================================
+log_message("Normalizing expression data...")
+
+# Log2 transformation
+expr_normalized <- log2(expr_data + 1)
+
+log_message("Expression data normalized (log2 transformation)")
+
+# ============================================================================
+# 4. Create Design Matrix for Isoform Comparison
+# ============================================================================
+log_message("Creating design matrix for isoform comparison...")
+
+# Match samples with genotypes
+samples_with_gt <- intersect(colnames(expr_normalized), apoe_genotypes$sample_id)
+expr_subset <- expr_normalized[, samples_with_gt]
+isoform_subset <- apoe_genotypes[match(samples_with_gt, apoe_genotypes$sample_id), ]
+
+log_message(paste("Analyzing", length(samples_with_gt), "samples with genotypes"))
+
+# Create factor for isoforms
+isoform_subset$isoform_group <- factor(
+  isoform_subset$isoform,
+  levels = c('E2/E2', 'E2/E3', 'E2/E4', 'E3/E3', 'E3/E4', 'E4/E4')
+)
+
+# Create design matrix
+design <- model.matrix(~ 0 + isoform_group, data = isoform_subset)
+colnames(design) <- gsub('isoform_group', '', colnames(design))
+
+log_message("Design matrix created")
+
+# ============================================================================
+# 5. Differential Expression Analysis
+# ============================================================================
+log_message("Performing differential expression analysis...")
+
+# Fit linear model
+fit <- lmFit(expr_subset, design)
+
+# Define contrast: E4/E4 vs E3/E3
+contrast_matrix <- makeContrasts(
+  'E4/E4' - 'E3/E3',
+  levels = design
+)
+
+fit2 <- contrasts.fit(fit, contrast_matrix)
+fit2 <- eBayes(fit2)
+
+# Extract results
+de_results <- topTable(fit2, n = Inf, adjust.method = 'BH')
+de_results <- rownames_to_column(as.data.frame(de_results), 'gene_id')
+
+sig_genes <- sum(de_results$adj.P.Val < 0.05)
+log_message(paste("Found", sig_genes, "significantly different genes (FDR < 0.05)"))
+
+# ============================================================================
+# 6. APOE-Specific Expression Analysis
+# ============================================================================
+log_message("Analyzing APOE-specific expression...")
+
+# Extract APOE expression (GENE_1)
+apoe_expr <- expr_subset[1, ]
+apoe_by_isoform <- tibble(
+  sample_id = names(apoe_expr),
+  apoe_expression = as.numeric(apoe_expr),
+  isoform = isoform_subset$isoform[match(names(apoe_expr), isoform_subset$sample_id)]
+)
+
+# Summary statistics
+apoe_summary <- apoe_by_isoform %>%
+  filter(!is.na(isoform)) %>%
+  group_by(isoform) %>%
+  summarise(
+    n = n(),
+    mean_expr = mean(apoe_expression, na.rm = TRUE),
+    sd_expr = sd(apoe_expression, na.rm = TRUE),
+    median_expr = median(apoe_expression, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(mean_expr))
+
+log_message("APOE Expression by Isoform:")
+print(apoe_summary)
+
+# ============================================================================
+# 7. Co-expression Analysis
+# ============================================================================
+log_message("Performing co-expression analysis with APOE...")
+
+# Calculate correlation with APOE (GENE_1)
+correlations <- cor(t(expr_subset), expr_subset[1, ], method = 'pearson')
+
+# Get top correlated genes
+top_corr <- tibble(
+  gene_id = rownames(correlations),
+  correlation = as.numeric(correlations),
+  abs_corr = abs(as.numeric(correlations))
+) %>%
+  arrange(desc(abs_corr)) %>%
+  filter(abs_corr < 1)  # Remove self-correlation
+
+log_message(paste("Identified", nrow(top_corr), "genes correlated with APOE"))
+log_message("Top 10 APOE co-expressed genes:")
+print(head(top_corr, 10))
+
+# ============================================================================
+# 8. Save Results
+# ============================================================================
+log_message("Saving expression analysis results...")
+
+dir.create('results/tables', showWarnings = FALSE, recursive = TRUE)
+
+# Save differential expression
+fwrite(
+  as.data.table(de_results),
+  'results/tables/differential_expression_E4_vs_E3.csv'
+)
+
+# Save APOE expression
+fwrite(
+  as.data.table(apoe_by_isoform),
+  'results/tables/apoe_expression_by_isoform.csv'
+)
+
+# Save APOE summary
+fwrite(
+  as.data.table(apoe_summary),
+  'results/tables/apoe_summary_statistics.csv'
+)
+
+# Save top correlations
+fwrite(
+  as.data.table(top_corr[1:500, ]),
+  'results/tables/apoe_coexpression_top500.csv'
+)
+
+log_message("Results saved to results/tables/")
+
+log_message("=== Expression Analysis Complete ===")
+
+cat("\n✓ Expression analysis complete!\n")

@@ -1,0 +1,161 @@
+#!/usr/bin/env Rscript
+"""
+Script 02: APOE Genotyping and Isoform Classification
+Classifies samples into APOE isoforms (E2/E3/E4) based on SNP genotypes
+"""
+
+library(tidyverse)
+library(data.table)
+library(yaml)
+
+log_message <- function(msg) {
+  timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  cat(paste0("[", timestamp, "] ", msg, "\n"))
+}
+
+log_message("=== Starting APOE Genotyping ===")
+
+# Load configuration
+config <- read_yaml('config/config.yaml')
+
+# ============================================================================
+# 1. APOE Isoform Lookup Table
+# ============================================================================
+log_message("Setting up APOE isoform mapping...")
+
+# APOE Isoforms are determined by two SNPs:
+# rs429358 (C/T) and rs7412 (C/G)
+isoform_map <- tibble(
+  rs429358 = c('C/C', 'C/C', 'C/T', 'C/T', 'T/T', 'T/T'),
+  rs7412 = c('C/C', 'C/G', 'C/C', 'C/G', 'C/C', 'C/G'),
+  isoform = c('E3/E3', 'E3/E4', 'E2/E3', 'E2/E4', 'E2/E2', 'E2/E4')
+)
+
+log_message("APOE isoform mapping created:")
+print(isoform_map)
+
+# ============================================================================
+# 2. Create Example Genotype Data
+# ============================================================================
+log_message("Creating example APOE genotype data...")
+
+set.seed(42)
+n_samples <- 500
+
+apoe_genotypes <- tibble(
+  sample_id = paste0('TCGA-', sprintf('%05d', 1:n_samples)),
+  rs429358_gt = sample(
+    c('C/C', 'C/T', 'T/T'),
+    n_samples,
+    replace = TRUE,
+    prob = c(0.55, 0.35, 0.10)
+  ),
+  rs7412_gt = sample(
+    c('C/C', 'C/G', 'G/G'),
+    n_samples,
+    replace = TRUE,
+    prob = c(0.80, 0.19, 0.01)
+  ),
+  call_rate = rnorm(n_samples, mean = 0.98, sd = 0.02)
+)
+
+log_message(paste("Created genotype data for", n_samples, "samples"))
+
+# ============================================================================
+# 3. Assign APOE Isoforms
+# ============================================================================
+log_message("Assigning APOE isoforms...")
+
+assign_isoform <- function(rs429358_gt, rs7412_gt) {
+  """
+  Assign APOE isoform based on SNP genotypes
+  """
+  
+  if (is.na(rs429358_gt) | is.na(rs7412_gt)) {
+    return(NA_character_)
+  }
+  
+  # Normalize allele order
+  normalize_gt <- function(gt) {
+    alleles <- sort(strsplit(gt, "/")[[1]])
+    paste(alleles, collapse = "/")
+  }
+  
+  rs429358_norm <- normalize_gt(rs429358_gt)
+  rs7412_norm <- normalize_gt(rs7412_gt)
+  
+  # Lookup isoform
+  matched <- isoform_map %>%
+    filter(rs429358 == rs429358_norm, rs7412 == rs7412_norm)
+  
+  if (nrow(matched) > 0) {
+    return(matched$isoform[1])
+  } else {
+    return(NA_character_)
+  }
+}
+
+# Apply isoform assignment
+apoe_genotypes <- apoe_genotypes %>%
+  mutate(
+    isoform = mapply(
+      assign_isoform,
+      rs429358_gt,
+      rs7412_gt
+    ),
+    quality = case_when(
+      call_rate >= 0.95 ~ 'PASS',
+      call_rate >= 0.90 ~ 'WARN',
+      TRUE ~ 'FAIL'
+    )
+  )
+
+log_message(paste("Genotyped", nrow(apoe_genotypes), "samples"))
+
+# ============================================================================
+# 4. Summary Statistics
+# ============================================================================
+log_message("Computing summary statistics...")
+
+isoform_counts <- apoe_genotypes %>%
+  filter(!is.na(isoform)) %>%
+  count(isoform, name = 'count') %>%
+  arrange(desc(count))
+
+log_message("APOE Isoform Distribution:")
+print(isoform_counts)
+
+# Quality control summary
+qc_summary <- tibble(
+  metric = c('Total samples', 'Genotyped samples', 'Pass QC', 'Mean call rate'),
+  value = c(
+    nrow(apoe_genotypes),
+    sum(!is.na(apoe_genotypes$isoform)),
+    sum(apoe_genotypes$quality == 'PASS', na.rm = TRUE),
+    round(mean(apoe_genotypes$call_rate, na.rm = TRUE), 4)
+  )
+)
+
+log_message("Quality Control Summary:")
+print(qc_summary)
+
+# ============================================================================
+# 5. Save Results
+# ============================================================================
+log_message("Saving APOE genotyping results...")
+
+dir.create('data/processed', showWarnings = FALSE, recursive = TRUE)
+
+# Save as RDS
+saveRDS(apoe_genotypes, 'data/processed/apoe_genotypes.rds')
+
+# Save as CSV
+fwrite(apoe_genotypes, 'data/processed/apoe_genotypes.csv')
+
+log_message("Results saved to:")
+log_message("  - data/processed/apoe_genotypes.rds")
+log_message("  - data/processed/apoe_genotypes.csv")
+
+log_message("=== APOE Genotyping Complete ===")
+
+cat("\n✓ APOE genotyping complete!\n")

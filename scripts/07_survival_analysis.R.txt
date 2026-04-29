@@ -1,0 +1,311 @@
+#!/usr/bin/env Rscript
+"""
+Script 07: Survival Analysis
+Performs Kaplan-Meier and Cox proportional hazards analysis
+"""
+
+library(tidyverse)
+library(survival)
+library(survminer)
+library(data.table)
+library(yaml)
+
+log_message <- function(msg) {
+  timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  cat(paste0("[", timestamp, "] ", msg, "\n"))
+}
+
+log_message("=== Starting Survival Analysis ===")
+
+# Load configuration
+config <- read_yaml('config/config.yaml')
+
+# ============================================================================
+# 1. Load Data
+# ============================================================================
+log_message("Loading data...")
+
+apoe_genotypes <- readRDS('data/processed/apoe_genotypes.rds')
+clinical_data <- fread('data/metadata/clinical_data.csv')
+tmb_data <- fread('results/tables/tmb_by_sample.csv')
+
+log_message(paste("Loaded clinical data for", nrow(clinical_data), "patients"))
+
+# ============================================================================
+# 2. Prepare Survival Data
+# ============================================================================
+log_message("Preparing survival data...")
+
+# Merge all data
+survival_data <- clinical_data %>%
+  left_join(
+    apoe_genotypes %>% select(sample_id, isoform),
+    by = 'sample_id'
+  ) %>%
+  left_join(
+    tmb_data %>% select(sample_id, tmb),
+    by = 'sample_id'
+  ) %>%
+  filter(!is.na(isoform), !is.na(survival_days), !is.na(survival_status)) %>%
+  mutate(
+    # Create isoform groups for better visualization
+    apoe_group = case_when(
+      isoform %in% c('E4/E4', 'E3/E4') ~ 'E4 Carrier',
+      isoform == 'E3/E3' ~ 'E3/E3',
+      TRUE ~ 'E2 Carrier'
+    ),
+    # Categorize TMB
+    tmb_group = case_when(
+      tmb > quantile(tmb, 0.75, na.rm = TRUE) ~ 'High TMB',
+      tmb < quantile(tmb, 0.25, na.rm = TRUE) ~ 'Low TMB',
+      TRUE ~ 'Intermediate TMB'
+    ),
+    # Create age groups
+    age_group = case_when(
+      age < 60 ~ '<60',
+      age >= 60 & age < 70 ~ '60-70',
+      TRUE ~ '>70'
+    ),
+    # Survival status (1 = event, 0 = censored)
+    event = survival_status
+  ) %>%
+  select(sample_id, survival_days, event, age, gender, stage, tmb, 
+         isoform, apoe_group, tmb_group, age_group)
+
+n_complete <- sum(complete.cases(survival_data))
+log_message(paste("Prepared survival data for", n_complete, "patients with complete data"))
+
+# ============================================================================
+# 3. Summary Statistics
+# ============================================================================
+log_message("Computing summary statistics...")
+
+summary_stats <- tibble(
+  metric = c(
+    'Total patients',
+    'Follow-up time (median, days)',
+    'Events (deaths)',
+    'Event rate (%)',
+    'Mean age',
+    'Male (%)',
+    'Stage III/IV (%)',
+    'Mean TMB'
+  ),
+  value = c(
+    nrow(survival_data),
+    round(median(survival_data$survival_days), 1),
+    sum(survival_data$event),
+    round(sum(survival_data$event) / nrow(survival_data) * 100, 1),
+    round(mean(survival_data$age), 1),
+    round(sum(survival_data$gender == 'M') / nrow(survival_data) * 100, 1),
+    round(sum(survival_data$stage %in% c('III', 'IV')) / nrow(survival_data) * 100, 1),
+    round(mean(survival_data$tmb, na.rm = TRUE), 2)
+  )
+)
+
+log_message("Summary Statistics:")
+print(summary_stats)
+
+# ============================================================================
+# 4. Univariate Cox Regression - APOE Isoforms
+# ============================================================================
+log_message("Performing univariate Cox regression for APOE isoforms...")
+
+# Create survival object
+surv_obj <- Surv(survival_data$survival_days, survival_data$event)
+
+# Cox regression by APOE group
+cox_apoe <- coxph(surv_obj ~ apoe_group, data = survival_data)
+cox_apoe_summary <- summary(cox_apoe)
+
+log_message("APOE Group Cox Regression Results:")
+print(cox_apoe_summary)
+
+# Extract coefficients
+cox_apoe_results <- tibble(
+  variable = rownames(cox_apoe_summary$coefficients),
+  coefficient = cox_apoe_summary$coefficients[, 'coef'],
+  exp_coef = cox_apoe_summary$coefficients[, 'exp(coef)'],
+  se = cox_apoe_summary$coefficients[, 'se(coef)'],
+  p_value = cox_apoe_summary$coefficients[, 'Pr(>|z|)'],
+  ci_lower = cox_apoe_summary$conf.int[, 'lower .95'],
+  ci_upper = cox_apoe_summary$conf.int[, 'upper .95']
+) %>%
+  mutate(
+    significant = p_value < 0.05,
+    hr_display = paste0(round(exp_coef, 2), ' (', 
+                        round(ci_lower, 2), '-', 
+                        round(ci_upper, 2), ')')
+  )
+
+log_message("APOE Group Hazard Ratios:")
+print(cox_apoe_results)
+
+# ============================================================================
+# 5. Univariate Cox Regression - Other Variables
+# ============================================================================
+log_message("Performing univariate Cox regression for clinical variables...")
+
+# Test each variable
+variables_to_test <- c('age', 'gender', 'stage', 'tmb', 'tmb_group')
+
+cox_univariate_results <- tibble()
+
+for (var in variables_to_test) {
+  formula_str <- paste("surv_obj ~", var)
+  cox_fit <- coxph(as.formula(formula_str), data = survival_data)
+  cox_summary <- summary(cox_fit)
+  
+  if (nrow(cox_summary$coefficients) > 0) {
+    cox_univariate_results <- bind_rows(
+      cox_univariate_results,
+      tibble(
+        variable = var,
+        coefficient = cox_summary$coefficients[1, 'coef'],
+        exp_coef = cox_summary$coefficients[1, 'exp(coef)'],
+        se = cox_summary$coefficients[1, 'se(coef)'],
+        p_value = cox_summary$coefficients[1, 'Pr(>|z|)'],
+        significant = p_value < 0.05
+      )
+    )
+  }
+}
+
+log_message("Univariate Analysis Results:")
+print(cox_univariate_results %>% arrange(p_value))
+
+# ============================================================================
+# 6. Multivariate Cox Regression
+# ============================================================================
+log_message("Performing multivariate Cox regression...")
+
+# Fit multivariate model
+cox_multi <- coxph(
+  surv_obj ~ apoe_group + age + gender + stage + tmb,
+  data = survival_data
+)
+cox_multi_summary <- summary(cox_multi)
+
+log_message("Multivariate Cox Regression Results:")
+print(cox_multi_summary)
+
+# Extract results
+cox_multi_results <- tibble(
+  variable = rownames(cox_multi_summary$coefficients),
+  coefficient = cox_multi_summary$coefficients[, 'coef'],
+  exp_coef = cox_multi_summary$coefficients[, 'exp(coef)'],
+  se = cox_multi_summary$coefficients[, 'se(coef)'],
+  p_value = cox_multi_summary$coefficients[, 'Pr(>|z|)'],
+  significant = p_value < 0.05
+) %>%
+  arrange(p_value)
+
+log_message("Significant variables in multivariate model:")
+print(cox_multi_results %>% filter(significant))
+
+# ============================================================================
+# 7. Kaplan-Meier Estimates by APOE Group
+# ============================================================================
+log_message("Computing Kaplan-Meier survival curves...")
+
+# KM by APOE group
+km_apoe <- survfit(surv_obj ~ apoe_group, data = survival_data)
+
+km_apoe_stats <- tibble(
+  group = names(km_apoe$strata),
+  n = km_apoe$n,
+  events = km_apoe$nevent,
+  median_survival = km_apoe$median
+)
+
+log_message("Kaplan-Meier Statistics by APOE Group:")
+print(km_apoe_stats)
+
+# Logrank test
+logrank_test <- survdiff(surv_obj ~ apoe_group, data = survival_data)
+logrank_pval <- 1 - pchisq(logrank_test$chisq, df = length(logrank_test$n) - 1)
+
+log_message(paste("Logrank test p-value:", round(logrank_pval, 4)))
+
+# ============================================================================
+# 8. Risk Stratification
+# ============================================================================
+log_message("Computing risk scores for stratification...")
+
+# Create risk groups based on APOE and TMB
+risk_groups <- survival_data %>%
+  mutate(
+    risk_group = case_when(
+      apoe_group == 'E4 Carrier' & tmb_group == 'High TMB' ~ 'High Risk',
+      apoe_group == 'E3/E3' & tmb_group == 'Low TMB' ~ 'Low Risk',
+      TRUE ~ 'Intermediate Risk'
+    )
+  )
+
+# KM by risk group
+km_risk <- survfit(surv_obj ~ risk_group, data = risk_groups)
+
+km_risk_stats <- tibble(
+  risk_group = names(km_risk$strata),
+  n = km_risk$n,
+  events = km_risk$nevent,
+  median_survival = km_risk$median
+)
+
+log_message("Kaplan-Meier Statistics by Risk Group:")
+print(km_risk_stats)
+
+# ============================================================================
+# 9. Save Results
+# ============================================================================
+log_message("Saving survival analysis results...")
+
+dir.create('results/tables', showWarnings = FALSE, recursive = TRUE)
+
+# Save summary statistics
+fwrite(
+  as.data.table(summary_stats),
+  'results/tables/survival_summary_statistics.csv'
+)
+
+# Save APOE Cox results
+fwrite(
+  as.data.table(cox_apoe_results),
+  'results/tables/cox_apoe_isoforms.csv'
+)
+
+# Save univariate results
+fwrite(
+  as.data.table(cox_univariate_results),
+  'results/tables/cox_univariate_analysis.csv'
+)
+
+# Save multivariate results
+fwrite(
+  as.data.table(cox_multi_results),
+  'results/tables/cox_multivariate_analysis.csv'
+)
+
+# Save KM statistics
+fwrite(
+  as.data.table(km_apoe_stats),
+  'results/tables/km_apoe_statistics.csv'
+)
+
+# Save risk group statistics
+fwrite(
+  as.data.table(km_risk_stats),
+  'results/tables/km_risk_group_statistics.csv'
+)
+
+# Save survival data for plotting
+fwrite(
+  as.data.table(survival_data),
+  'results/tables/survival_data_prepared.csv'
+)
+
+log_message("Results saved to results/tables/")
+
+log_message("=== Survival Analysis Complete ===")
+
+cat("\n✓ Survival analysis complete!\n")

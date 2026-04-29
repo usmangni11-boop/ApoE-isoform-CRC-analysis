@@ -1,0 +1,382 @@
+#!/usr/bin/env Rscript
+"""
+Utility Functions for APOE CRC Analysis
+Common functions used across multiple scripts
+"""
+
+library(tidyverse)
+library(data.table)
+
+# ============================================================================
+# Logging Functions
+# ============================================================================
+
+#' Create timestamped log message
+#'
+#' @param msg Character string message
+#' @param log_file Optional log file path
+#'
+#' @return Printed and optionally logged message
+#'
+log_message <- function(msg, log_file = NULL) {
+  timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  log_msg <- paste0("[", timestamp, "] ", msg)
+  cat(log_msg, "\n")
+  
+  if (!is.null(log_file)) {
+    cat(log_msg, "\n", file = log_file, append = TRUE)
+  }
+}
+
+#' Log section header
+#'
+#' @param section_name Character string section name
+#'
+#' @return Formatted section header
+#'
+log_section <- function(section_name) {
+  cat("\n")
+  cat(paste0("=== ", section_name, " ==="), "\n")
+  cat("\n")
+}
+
+# ============================================================================
+# APOE Isoform Functions
+# ============================================================================
+
+#' Assign APOE isoform from SNP genotypes
+#'
+#' @param rs429358_gt Character rs429358 genotype (C/C, C/T, T/T)
+#' @param rs7412_gt Character rs7412 genotype (C/C, C/G, G/G)
+#'
+#' @return Character APOE isoform designation
+#'
+#' @details
+#' APOE isoforms are determined by two SNPs:
+#' - rs429358 (C/T)
+#' - rs7412 (C/G)
+#'
+assign_apoe_isoform <- function(rs429358_gt, rs7412_gt) {
+  
+  isoform_map <- tibble(
+    rs429358 = c('C/C', 'C/C', 'C/T', 'C/T', 'T/T', 'T/T'),
+    rs7412 = c('C/C', 'C/G', 'C/C', 'C/G', 'C/C', 'C/G'),
+    isoform = c('E3/E3', 'E3/E4', 'E2/E3', 'E2/E4', 'E2/E2', 'E2/E4')
+  )
+  
+  if (is.na(rs429358_gt) | is.na(rs7412_gt)) {
+    return(NA_character_)
+  }
+  
+  # Normalize allele order
+  normalize_gt <- function(gt) {
+    alleles <- sort(strsplit(gt, "/")[[1]])
+    paste(alleles, collapse = "/")
+  }
+  
+  rs429358_norm <- normalize_gt(rs429358_gt)
+  rs7412_norm <- normalize_gt(rs7412_gt)
+  
+  # Lookup isoform
+  matched <- isoform_map %>%
+    filter(rs429358 == rs429358_norm, rs7412 == rs7412_norm)
+  
+  if (nrow(matched) > 0) {
+    return(matched$isoform[1])
+  } else {
+    return(NA_character_)
+  }
+}
+
+#' Categorize APOE isoforms into groups
+#'
+#' @param isoform Character vector of APOE isoforms
+#'
+#' @return Factor with three levels: E2 Carrier, E3/E3, E4 Carrier
+#'
+#' @details
+#' Groups isoforms as:
+#' - E2 Carrier: E2/E2, E2/E3
+#' - E3/E3: E3/E3
+#' - E4 Carrier: E3/E4, E4/E4
+#'
+categorize_apoe_group <- function(isoform) {
+  factor(
+    case_when(
+      isoform %in% c('E2/E2', 'E2/E3') ~ 'E2 Carrier',
+      isoform == 'E3/E3' ~ 'E3/E3',
+      isoform %in% c('E3/E4', 'E4/E4') ~ 'E4 Carrier',
+      TRUE ~ NA_character_
+    ),
+    levels = c('E2 Carrier', 'E3/E3', 'E4 Carrier')
+  )
+}
+
+# ============================================================================
+# Statistical Functions
+# ============================================================================
+
+#' Perform paired t-test with effect size
+#'
+#' @param x Numeric vector
+#' @param y Numeric vector
+#'
+#' @return List with t-statistic, p-value, and Cohen's d
+#'
+t_test_with_effect <- function(x, y) {
+  test_result <- t.test(x, y)
+  
+  # Cohen's d
+  cohens_d <- (mean(x) - mean(y)) / sqrt(((length(x)-1)*sd(x)^2 + 
+                                            (length(y)-1)*sd(y)^2) / 
+                                           (length(x) + length(y) - 2))
+  
+  list(
+    t_stat = test_result$statistic,
+    p_value = test_result$p.value,
+    cohens_d = cohens_d,
+    mean_diff = mean(x) - mean(y)
+  )
+}
+
+#' Calculate odds ratio with 95% CI
+#'
+#' @param a Count of positive outcomes in group 1
+#' @param b Count of negative outcomes in group 1
+#' @param c Count of positive outcomes in group 2
+#' @param d Count of negative outcomes in group 2
+#'
+#' @return Data frame with OR and 95% CI
+#'
+calculate_odds_ratio <- function(a, b, c, d) {
+  or <- (a * d) / (b * c)
+  se_log_or <- sqrt(1/a + 1/b + 1/c + 1/d)
+  ci_lower <- exp(log(or) - 1.96 * se_log_or)
+  ci_upper <- exp(log(or) + 1.96 * se_log_or)
+  
+  tibble(
+    odds_ratio = or,
+    ci_lower = ci_lower,
+    ci_upper = ci_upper,
+    or_display = paste0(round(or, 2), ' (', round(ci_lower, 2), '-', round(ci_upper, 2), ')')
+  )
+}
+
+# ============================================================================
+# Data Processing Functions
+# ============================================================================
+
+#' Normalize expression data
+#'
+#' @param expr_matrix Matrix with genes as rows, samples as columns
+#' @param method Character normalization method ('log2', 'vst', 'quantile')
+#'
+#' @return Normalized expression matrix
+#'
+normalize_expression <- function(expr_matrix, method = 'log2', pseudocount = 1) {
+  
+  if (method == 'log2') {
+    return(log2(expr_matrix + pseudocount))
+  } else if (method == 'vst') {
+    # Variance stabilizing transformation approximation
+    return(asinh(expr_matrix / 2))
+  } else {
+    warning("Unknown normalization method. Returning log2 normalized data.")
+    return(log2(expr_matrix + pseudocount))
+  }
+}
+
+#' Calculate TMB (Tumor Mutational Burden)
+#'
+#' @param mutation_data Data frame with columns: sample_id, variant_class, consequence
+#' @param mb_size Numeric exome size in megabases (default 38)
+#' @param consequence_type Character consequence type to include (default 'HIGH', 'MODERATE')
+#'
+#' @return Data frame with sample_id and tmb
+#'
+calculate_tmb <- function(mutation_data, mb_size = 38, 
+                         consequence_type = c('HIGH', 'MODERATE')) {
+  
+  mutation_data %>%
+    filter(consequence %in% consequence_type) %>%
+    group_by(sample_id) %>%
+    summarise(
+      n_mutations = n(),
+      tmb = n() / mb_size,
+      .groups = 'drop'
+    )
+}
+
+#' Filter genes by expression threshold
+#'
+#' @param expr_matrix Expression matrix
+#' @param min_mean Minimum mean expression across samples
+#' @param min_samples Minimum fraction of samples expressing gene
+#'
+#' @return Filtered expression matrix
+#'
+filter_low_expression <- function(expr_matrix, min_mean = 1, min_samples = 0.1) {
+  
+  # Calculate mean expression
+  mean_expr <- rowMeans(expr_matrix, na.rm = TRUE)
+  
+  # Count samples with expression > 0
+  n_expressed <- rowSums(expr_matrix > 0, na.rm = TRUE)
+  frac_expressed <- n_expressed / ncol(expr_matrix)
+  
+  # Filter
+  keep_idx <- which(mean_expr >= min_mean & frac_expressed >= min_samples)
+  
+  expr_matrix[keep_idx, ]
+}
+
+# ============================================================================
+# Visualization Functions
+# ============================================================================
+
+#' Create custom ggplot2 theme
+#'
+#' @param base_size Base font size
+#' @param palette Color palette name
+#'
+#' @return ggplot2 theme object
+#'
+theme_manuscript <- function(base_size = 12, palette = 'Set2') {
+  theme_minimal() +
+    theme(
+      text = element_text(family = 'Arial', size = base_size),
+      plot.title = element_text(face = 'bold', size = base_size + 2),
+      axis.title = element_text(face = 'bold', size = base_size),
+      axis.text = element_text(size = base_size - 1),
+      legend.title = element_text(face = 'bold', size = base_size),
+      legend.text = element_text(size = base_size - 1),
+      panel.grid.major = element_line(color = 'gray90', size = 0.3),
+      panel.grid.minor = element_blank(),
+      plot.background = element_rect(fill = 'white', color = NA)
+    )
+}
+
+#' Create figure with standard dimensions
+#'
+#' @param plot ggplot object
+#' @param filename Output filename
+#' @param width Figure width in inches
+#' @param height Figure height in inches
+#' @param dpi Resolution in DPI
+#'
+#' @return Saves figure to file
+#'
+save_figure <- function(plot, filename, width = 10, height = 8, dpi = 300) {
+  ggsave(
+    filename,
+    plot,
+    width = width,
+    height = height,
+    dpi = dpi,
+    units = 'in'
+  )
+  cat("✓ Figure saved:", filename, "\n")
+}
+
+# ============================================================================
+# Quality Control Functions
+# ============================================================================
+
+#' Generate QC report summary
+#'
+#' @param data_list List of data objects to assess
+#'
+#' @return Data frame with QC metrics
+#'
+generate_qc_report <- function(data_list) {
+  
+  qc_report <- tibble(
+    dataset = names(data_list),
+    n_rows = sapply(data_list, nrow),
+    n_cols = sapply(data_list, ncol),
+    complete_cases = sapply(data_list, function(x) sum(complete.cases(x))),
+    pct_complete = sapply(data_list, function(x) {
+      sum(complete.cases(x)) / nrow(x) * 100
+    })
+  )
+  
+  return(qc_report)
+}
+
+#' Check for missing values
+#'
+#' @param data Data frame
+#' @param threshold Percent missing threshold for warning
+#'
+#' @return Data frame with missing value summary
+#'
+check_missing_values <- function(data, threshold = 10) {
+  
+  missing_summary <- tibble(
+    column = colnames(data),
+    n_missing = colSums(is.na(data)),
+    pct_missing = colSums(is.na(data)) / nrow(data) * 100
+  ) %>%
+    filter(n_missing > 0) %>%
+    mutate(flag = ifelse(pct_missing > threshold, 'WARNING', 'OK'))
+  
+  return(missing_summary)
+}
+
+# ============================================================================
+# Export Functions
+# ============================================================================
+
+#' Export results with metadata
+#'
+#' @param data Data frame to export
+#' @param filename Output filename
+#' @param format File format ('csv', 'rds', 'xlsx')
+#' @param metadata Optional metadata list
+#'
+#' @return Saves file
+#'
+export_results <- function(data, filename, format = 'csv', metadata = NULL) {
+  
+  if (format == 'csv') {
+    fwrite(as.data.table(data), filename)
+  } else if (format == 'rds') {
+    saveRDS(data, filename)
+  } else if (format == 'xlsx') {
+    # Requires openxlsx package
+    openxlsx::write.xlsx(data, filename)
+  }
+  
+  cat("✓ Results exported:", filename, "\n")
+}
+
+# ============================================================================
+# Session Information
+# ============================================================================
+
+#' Print session information with packages
+#'
+#' @return Printed session info
+#'
+print_session_info <- function() {
+  cat("\n=== Session Information ===\n")
+  cat("R Version:", R.version$version.string, "\n")
+  cat("Platform:", R.version$platform, "\n")
+  cat("\nKey Packages:\n")
+  
+  packages <- c('tidyverse', 'data.table', 'survival', 'limma', 'yaml')
+  for (pkg in packages) {
+    if (require(pkg, quietly = TRUE, character.only = TRUE)) {
+      ver <- packageVersion(pkg)
+      cat(sprintf("  %s: %s\n", pkg, ver))
+    }
+  }
+  
+  cat("\n")
+}
+
+# ============================================================================
+# End of utility functions
+# ============================================================================
+
+cat("✓ Utility functions loaded\n")

@@ -1,0 +1,360 @@
+#!/usr/bin/env Rscript
+"""
+Script 08: Generate Publication-Quality Figures
+Creates all figures for the manuscript
+"""
+
+library(tidyverse)
+library(gridExtra)
+library(ComplexHeatmap)
+library(survival)
+library(survminer)
+library(data.table)
+library(yaml)
+library(scales)
+
+log_message <- function(msg) {
+  timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  cat(paste0("[", timestamp, "] ", msg, "\n"))
+}
+
+log_message("=== Starting Figure Generation ===")
+
+# Load configuration
+config <- read_yaml('config/config.yaml')
+
+# Output directory
+output_dir <- config$visualization$output_dir
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+fig_width <- config$visualization$width
+fig_height <- config$visualization$height
+fig_dpi <- config$visualization$dpi
+fig_format <- config$visualization$figure_format
+
+# ============================================================================
+# 1. Figure 1: APOE Isoform Distribution
+# ============================================================================
+log_message("Creating Figure 1: APOE Isoform Distribution...")
+
+apoe_genotypes <- readRDS('data/processed/apoe_genotypes.rds')
+
+fig1_data <- apoe_genotypes %>%
+  filter(!is.na(isoform)) %>%
+  count(isoform) %>%
+  mutate(
+    percentage = round(n / sum(n) * 100, 1),
+    isoform = factor(isoform, levels = c('E2/E2', 'E2/E3', 'E2/E4', 'E3/E3', 'E3/E4', 'E4/E4'))
+  ) %>%
+  arrange(isoform)
+
+fig1 <- ggplot(fig1_data, aes(x = isoform, y = n, fill = isoform)) +
+  geom_bar(stat = 'identity', color = 'black', size = 1) +
+  geom_text(aes(label = paste0(n, '\n(', percentage, '%)')), 
+            vjust = -0.5, size = 4, fontface = 'bold') +
+  scale_fill_brewer(palette = 'Set2') +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 12, face = 'bold'),
+    axis.text = element_text(size = 11),
+    legend.position = 'none',
+    panel.grid.major.y = element_line(color = 'gray90')
+  ) +
+  labs(
+    title = 'APOE Isoform Distribution in CRC',
+    x = 'APOE Isoform',
+    y = 'Number of Samples'
+  )
+
+ggsave(
+  paste0(output_dir, '/Figure1_APOE_Distribution.', fig_format),
+  fig1,
+  width = fig_width, height = fig_height, dpi = fig_dpi
+)
+log_message("✓ Figure 1 saved")
+
+# ============================================================================
+# 2. Figure 2: APOE Expression by Isoform
+# ============================================================================
+log_message("Creating Figure 2: APOE Expression by Isoform...")
+
+apoe_expr <- fread('results/tables/apoe_expression_by_isoform.csv')
+
+fig2 <- ggplot(apoe_expr, aes(x = isoform, y = apoe_expression, fill = isoform)) +
+  geom_boxplot(alpha = 0.7, outlier.size = 1) +
+  geom_jitter(width = 0.2, alpha = 0.3, size = 1) +
+  scale_fill_brewer(palette = 'Set2') +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 12, face = 'bold'),
+    axis.text = element_text(size = 11),
+    legend.position = 'none',
+    panel.grid.major.y = element_line(color = 'gray90')
+  ) +
+  labs(
+    title = 'APOE Expression Levels by Isoform',
+    x = 'APOE Isoform',
+    y = 'Log2(Expression + 1)'
+  )
+
+ggsave(
+  paste0(output_dir, '/Figure2_APOE_Expression.', fig_format),
+  fig2,
+  width = fig_width, height = fig_height, dpi = fig_dpi
+)
+log_message("✓ Figure 2 saved")
+
+# ============================================================================
+# 3. Figure 3: Immune Cell Infiltration
+# ============================================================================
+log_message("Creating Figure 3: Immune Cell Infiltration...")
+
+immune_data <- fread('results/tables/immune_apoe_merged.csv') %>%
+  pivot_longer(
+    cols = c('T_cell_CD8', 'T_cell_CD4', 'Macrophage', 'B_cell', 'NK_cell'),
+    names_to = 'cell_type',
+    values_to = 'fraction'
+  )
+
+fig3 <- ggplot(immune_data, aes(x = cell_type, y = fraction, fill = isoform)) +
+  geom_boxplot(alpha = 0.7, outlier.size = 0.5) +
+  scale_fill_brewer(palette = 'Set2') +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 12, face = 'bold'),
+    axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 10),
+    legend.position = 'bottom',
+    legend.title = element_text(face = 'bold'),
+    panel.grid.major.y = element_line(color = 'gray90')
+  ) +
+  labs(
+    title = 'Immune Cell Infiltration by APOE Isoform',
+    x = 'Cell Type',
+    y = 'Cell Fraction',
+    fill = 'APOE Isoform'
+  )
+
+ggsave(
+  paste0(output_dir, '/Figure3_Immune_Infiltration.', fig_format),
+  fig3,
+  width = 10, height = fig_height, dpi = fig_dpi
+)
+log_message("✓ Figure 3 saved")
+
+# ============================================================================
+# 4. Figure 4: Tumor Mutational Burden
+# ============================================================================
+log_message("Creating Figure 4: Tumor Mutational Burden...")
+
+tmb_data <- fread('results/tables/tmb_by_sample.csv')
+
+fig4 <- ggplot(tmb_data, aes(x = isoform, y = tmb, fill = isoform)) +
+  geom_boxplot(alpha = 0.7, outlier.size = 1) +
+  geom_jitter(width = 0.2, alpha = 0.3, size = 1) +
+  scale_fill_brewer(palette = 'Set2') +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 12, face = 'bold'),
+    axis.text = element_text(size = 11),
+    legend.position = 'none',
+    panel.grid.major.y = element_line(color = 'gray90')
+  ) +
+  labs(
+    title = 'Tumor Mutational Burden by APOE Isoform',
+    x = 'APOE Isoform',
+    y = 'TMB (mutations/Mb)'
+  )
+
+ggsave(
+  paste0(output_dir, '/Figure4_TMB.', fig_format),
+  fig4,
+  width = fig_width, height = fig_height, dpi = fig_dpi
+)
+log_message("✓ Figure 4 saved")
+
+# ============================================================================
+# 5. Figure 5: Pathway Enrichment
+# ============================================================================
+log_message("Creating Figure 5: Pathway Enrichment...")
+
+pathway_enrich <- fread('results/tables/pathway_enrichment.csv') %>%
+  arrange(desc(log2_enrichment)) %>%
+  head(15)
+
+fig5 <- ggplot(pathway_enrich, aes(x = reorder(pathway, log2_enrichment), 
+                                    y = log2_enrichment,
+                                    fill = -log10(p_value))) +
+  geom_bar(stat = 'identity', color = 'black', size = 0.5) +
+  scale_fill_gradient(low = 'lightblue', high = 'darkblue') +
+  coord_flip() +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 12, face = 'bold'),
+    axis.text = element_text(size = 10),
+    legend.position = 'right',
+    legend.title = element_text(face = 'bold', size = 10),
+    panel.grid.major.x = element_line(color = 'gray90')
+  ) +
+  labs(
+    title = 'Top 15 Enriched Pathways',
+    x = 'Pathway',
+    y = 'Log2(Enrichment Score)',
+    fill = '-Log10(p-value)'
+  )
+
+ggsave(
+  paste0(output_dir, '/Figure5_Pathway_Enrichment.', fig_format),
+  fig5,
+  width = 10, height = fig_height, dpi = fig_dpi
+)
+log_message("✓ Figure 5 saved")
+
+# ============================================================================
+# 6. Figure 6: Driver Gene Mutations
+# ============================================================================
+log_message("Creating Figure 6: Driver Gene Mutations...")
+
+driver_mut <- fread('results/tables/driver_gene_mutations.csv')
+
+fig6 <- ggplot(driver_mut, aes(x = reorder(gene, -n_samples), y = frequency)) +
+  geom_bar(stat = 'identity', fill = 'steelblue', color = 'black', size = 0.5) +
+  geom_text(aes(label = paste0(n_samples)), vjust = -0.5, size = 3.5) +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 12, face = 'bold'),
+    axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 10),
+    panel.grid.major.y = element_line(color = 'gray90')
+  ) +
+  labs(
+    title = 'Driver Gene Mutation Frequencies',
+    x = 'Gene',
+    y = 'Frequency (%)'
+  )
+
+ggsave(
+  paste0(output_dir, '/Figure6_Driver_Mutations.', fig_format),
+  fig6,
+  width = 10, height = fig_height, dpi = fig_dpi
+)
+log_message("✓ Figure 6 saved")
+
+# ============================================================================
+# 7. Figure 7: Kaplan-Meier Survival Curves
+# ============================================================================
+log_message("Creating Figure 7: Kaplan-Meier Survival Curves...")
+
+surv_data <- fread('results/tables/survival_data_prepared.csv') %>%
+  mutate(apoe_group = factor(apoe_group, 
+                             levels = c('E2 Carrier', 'E3/E3', 'E4 Carrier')))
+
+surv_obj <- Surv(surv_data$survival_days, surv_data$event)
+fit_km <- survfit(surv_obj ~ apoe_group, data = surv_data)
+
+fig7 <- ggsurvplot(
+  fit_km,
+  data = surv_data,
+  conf.int = TRUE,
+  palette = 'Set2',
+  risk.table = TRUE,
+  risk.table.height = 0.25,
+  title = 'Overall Survival by APOE Isoform',
+  xlab = 'Time (days)',
+  ylab = 'Overall Survival Probability',
+  legend.labs = c('E2 Carrier', 'E3/E3', 'E4 Carrier'),
+  legend.title = 'APOE Group',
+  font.main = c(14, 'bold'),
+  font.x = c(12, 'bold'),
+  font.y = c(12, 'bold'),
+  font.legend = c(11, 'plain')
+)
+
+ggsave(
+  paste0(output_dir, '/Figure7_KM_Survival.', fig_format),
+  fig7$plot,
+  width = 10, height = fig_height, dpi = fig_dpi
+)
+log_message("✓ Figure 7 saved")
+
+# ============================================================================
+# 8. Figure 8: Cox Regression Forest Plot
+# ============================================================================
+log_message("Creating Figure 8: Cox Regression Forest Plot...")
+
+cox_results <- fread('results/tables/cox_multivariate_analysis.csv') %>%
+  filter(!is.na(p_value)) %>%
+  arrange(desc(exp_coef))
+
+fig8 <- ggplot(cox_results, aes(x = reorder(variable, exp_coef), y = exp_coef)) +
+  geom_point(size = 4, aes(color = significant)) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper, color = significant),
+                width = 0.2, size = 1) +
+  geom_hline(yintercept = 1, linetype = 'dashed', color = 'red', size = 1) +
+  scale_color_manual(values = c('TRUE' = 'darkred', 'FALSE' = 'gray50')) +
+  coord_flip() +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 12, face = 'bold'),
+    axis.text = element_text(size = 11),
+    legend.position = 'bottom',
+    legend.title = element_text(face = 'bold'),
+    panel.grid.major.x = element_line(color = 'gray90')
+  ) +
+  labs(
+    title = 'Multivariate Cox Regression Analysis',
+    x = 'Variable',
+    y = 'Hazard Ratio (95% CI)',
+    color = 'Significant\n(p < 0.05)'
+  ) +
+  scale_y_log10()
+
+ggsave(
+  paste0(output_dir, '/Figure8_Cox_ForestPlot.', fig_format),
+  fig8,
+  width = 10, height = 6, dpi = fig_dpi
+)
+log_message("✓ Figure 8 saved")
+
+# ============================================================================
+# 9. Summary and Completion
+# ============================================================================
+log_message("Creating figure summary...")
+
+figure_manifest <- tibble(
+  figure_number = 1:8,
+  title = c(
+    'APOE Isoform Distribution',
+    'APOE Expression by Isoform',
+    'Immune Cell Infiltration',
+    'Tumor Mutational Burden',
+    'Pathway Enrichment',
+    'Driver Gene Mutations',
+    'Kaplan-Meier Survival Curves',
+    'Cox Regression Forest Plot'
+  ),
+  filename = paste0('Figure', 1:8, '_*.', fig_format),
+  description = c(
+    'Bar chart showing APOE isoform distribution in CRC cohort',
+    'Box plot comparing APOE expression levels across isoforms',
+    'Box plots of immune cell fractions by APOE isoform',
+    'Box plot of TMB values stratified by APOE isoform',
+    'Horizontal bar plot of top 15 enriched pathways',
+    'Bar plot of driver gene mutation frequencies',
+    'Kaplan-Meier curves with risk tables',
+    'Forest plot of Cox multivariate analysis results'
+  )
+)
+
+fwrite(
+  figure_manifest,
+  paste0(output_dir, '/FIGURE_MANIFEST.csv')
+)
+
+log_message("Figure Manifest:")
+print(figure_manifest)
+
+log_message("=== Figure Generation Complete ===")
+log_message(paste("All figures saved to:", output_dir))
+
+cat("\n✓ All figures generated successfully!\n")

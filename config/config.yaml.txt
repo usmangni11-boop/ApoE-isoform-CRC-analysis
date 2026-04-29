@@ -1,0 +1,126 @@
+# APOE CRC Analysis Configuration
+# Customize analysis parameters here
+
+# Data sources and parameters
+data:
+  # GDC projects to analyze
+  projects:
+    - 'TCGA-COAD'
+    - 'TCGA-READ'
+  
+  # Data category for expression
+  expression:
+    data_category: 'Transcriptome Profiling'
+    data_type: 'Gene Expression Quantification'
+    workflow_type: 'STAR - Counts'
+  
+  # Mutation data
+  mutations:
+    data_category: 'Simple Nucleotide Variation'
+    data_type: 'Raw Simple Somatic Mutation'
+    file_format: 'MAF'
+  
+  # Sample filters
+  sample_type: 'Primary Tumor'
+  
+  # Download settings
+  output_dir: 'data/raw'
+  n_workers: 4
+
+# APOE genotyping parameters
+apoe:
+  snp_rs429358: 'rs429358'
+  snp_rs7412: 'rs7412'
+  
+  # Isoform mappings
+  isoforms:
+    'E2/E2': ['T/T', 'T/T']
+    'E2/E3': ['T/C', 'T/C']
+    'E2/E4': ['T/T', 'C/G']
+    'E3/E3': ['C/C', 'C/C']
+    'E3/E4': ['C/C', 'C/G']
+    'E4/E4': ['C/C', 'C/C']
+  
+  min_call_rate: 0.95
+
+# Expression analysis
+expression:
+  normalize_method: 'log2'
+  pseudocount: 1
+  top_genes: 5000
+  min_counts: 10
+  min_samples: 0.1
+  
+  test_method: 'limma'
+  pvalue_threshold: 0.05
+  log2fc_threshold: 1.0
+  adjust_method: 'BH'
+  
+  correlation_method: 'pearson'
+  corr_threshold: 0.3
+
+# Immune deconvolution
+immune:
+  method: 'quantiseq'
+  
+  cell_types:
+    - 'T cell CD8'
+    - 'T cell CD4'
+    - 'Macrophage'
+    - 'B cell'
+    - 'NK cell'
+  
+  scale_to_100: true
+
+# Mutation analysis
+mutation:
+  mb_size: 38
+  min_variants: 5
+  variant_class: 'missense_variant'
+  top_genes: 20
+  min_frequency: 0.05
+
+# Pathway analysis
+pathway:
+  database: 'hallmark'
+  min_size: 10
+  max_size: 500
+  nperm: 10000
+  pvalue_threshold: 0.05
+  padj_threshold: 0.05
+
+# Survival analysis
+survival:
+  time_unit: 'days'
+  follow_up_threshold: 30
+  
+  outcomes:
+    - 'overall_survival'
+    - 'disease_free_survival'
+  
+  adjust_variables:
+    - 'age'
+    - 'gender'
+    - 'stage'
+    - 'tmb'
+  
+  median_cutoff: true
+  risk_table: true
+  pvalue_method: 'logrank'
+
+# Visualization
+visualization:
+  figure_format: 'pdf'
+  dpi: 300
+  width: 10
+  height: 8
+  theme: 'minimal'
+  palette: 'Set2'
+  output_dir: 'results/figures'
+
+# Logging
+logging:
+  log_dir: 'results/logs'
+  log_level: 'INFO'
+  log_file: 'analysis.log'
+  random_seed: 42

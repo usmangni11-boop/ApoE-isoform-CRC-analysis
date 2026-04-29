@@ -1,0 +1,247 @@
+#!/usr/bin/env Rscript
+"""
+Script 05: Mutation Analysis and Tumor Mutational Burden (TMB)
+Analyzes mutations, calculates TMB, and identifies recurrent mutations
+"""
+
+library(tidyverse)
+library(data.table)
+library(yaml)
+
+log_message <- function(msg) {
+  timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  cat(paste0("[", timestamp, "] ", msg, "\n"))
+}
+
+log_message("=== Starting Mutation Analysis ===")
+
+# Load configuration
+config <- read_yaml('config/config.yaml')
+
+# ============================================================================
+# 1. Load APOE Genotypes
+# ============================================================================
+log_message("Loading APOE genotype data...")
+
+apoe_genotypes <- readRDS('data/processed/apoe_genotypes.rds')
+n_samples <- nrow(apoe_genotypes)
+
+log_message(paste("Loaded genotypes for", n_samples, "samples"))
+
+# ============================================================================
+# 2. Create Example Mutation Data
+# ============================================================================
+log_message("Creating example mutation data...")
+
+set.seed(42)
+
+# Create mutation data
+mutations <- tibble(
+  sample_id = rep(apoe_genotypes$sample_id, each = round(runif(1, 100, 300))),
+  gene = rep(
+    c('TP53', 'APC', 'KRAS', 'SMAD4', 'PIK3CA', 'BRAF', 'MSH2', 'MLH1', 'PTEN', 'CDH1',
+      paste0('GENE_', 11:100)),
+    length.out = length(sample_id)
+  ),
+  variant_class = sample(
+    c('missense_variant', 'frameshift_variant', 'stop_gained', 'splice_site_variant'),
+    length(sample_id),
+    replace = TRUE,
+    prob = c(0.60, 0.20, 0.10, 0.10)
+  ),
+  consequence = sample(
+    c('HIGH', 'MODERATE', 'LOW'),
+    length(sample_id),
+    replace = TRUE,
+    prob = c(0.15, 0.50, 0.35)
+  )
+) %>%
+  distinct()  # Remove duplicates
+
+log_message(paste("Created mutation data with", nrow(mutations), "variants"))
+
+# ============================================================================
+# 3. Calculate Tumor Mutational Burden (TMB)
+# ============================================================================
+log_message("Calculating Tumor Mutational Burden (TMB)...")
+
+# TMB = number of non-synonymous mutations / megabases of exome
+mb_size <- config$mutation$mb_size  # ~38 MB for whole exome
+
+tmb_data <- mutations %>%
+  filter(consequence %in% c('HIGH', 'MODERATE')) %>%  # Non-synonymous
+  group_by(sample_id) %>%
+  summarise(
+    n_mutations = n(),
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    tmb = n_mutations / mb_size
+  ) %>%
+  right_join(
+    apoe_genotypes %>% select(sample_id, isoform),
+    by = 'sample_id'
+  ) %>%
+  mutate(
+    n_mutations = replace_na(n_mutations, 0),
+    tmb = replace_na(tmb, 0)
+  )
+
+log_message("TMB calculation complete")
+log_message(paste("Mean TMB:", round(mean(tmb_data$tmb, na.rm = TRUE), 2), "mutations/Mb"))
+
+# ============================================================================
+# 4. TMB by APOE Isoform
+# ============================================================================
+log_message("Analyzing TMB by APOE isoform...")
+
+tmb_summary <- tmb_data %>%
+  filter(!is.na(isoform)) %>%
+  group_by(isoform) %>%
+  summarise(
+    n = n(),
+    mean_tmb = mean(tmb, na.rm = TRUE),
+    sd_tmb = sd(tmb, na.rm = TRUE),
+    median_tmb = median(tmb, na.rm = TRUE),
+    q25 = quantile(tmb, 0.25, na.rm = TRUE),
+    q75 = quantile(tmb, 0.75, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(mean_tmb))
+
+log_message("TMB Summary by APOE Isoform:")
+print(tmb_summary)
+
+# ============================================================================
+# 5. Recurrent Mutations Analysis
+# ============================================================================
+log_message("Identifying recurrent mutations...")
+
+recurrent_mutations <- mutations %>%
+  group_by(gene, variant_class) %>%
+  summarise(
+    n_samples = n_distinct(sample_id),
+    frequency = n_distinct(sample_id) / n_samples,
+    .groups = 'drop'
+  ) %>%
+  filter(frequency >= 0.05) %>%  # >= 5% frequency
+  arrange(desc(n_samples)) %>%
+  head(20)
+
+log_message("Top 20 Recurrent Mutations:")
+print(recurrent_mutations)
+
+# ============================================================================
+# 6. Driver Genes Analysis
+# ============================================================================
+log_message("Analyzing driver genes...")
+
+# Define known cancer driver genes in colorectal cancer
+driver_genes <- c('TP53', 'APC', 'KRAS', 'SMAD4', 'PIK3CA', 'BRAF', 'MSH2', 'MLH1', 'PTEN', 'CDH1')
+
+driver_mutations <- mutations %>%
+  filter(gene %in% driver_genes) %>%
+  group_by(gene) %>%
+  summarise(
+    n_samples = n_distinct(sample_id),
+    frequency = round(n_distinct(sample_id) / n_samples * 100, 2),
+    mean_consequence = case_when(
+      mean(consequence == 'HIGH') > 0.5 ~ 'HIGH',
+      mean(consequence == 'MODERATE') > 0.5 ~ 'MODERATE',
+      TRUE ~ 'LOW'
+    ),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(n_samples))
+
+log_message("Driver Gene Mutation Frequencies:")
+print(driver_mutations)
+
+# ============================================================================
+# 7. Mutation Profile by APOE Isoform
+# ============================================================================
+log_message("Analyzing mutation profiles by APOE isoform...")
+
+# Merge mutations with isoform data
+mutations_with_isoform <- mutations %>%
+  left_join(
+    apoe_genotypes %>% select(sample_id, isoform),
+    by = 'sample_id'
+  ) %>%
+  filter(!is.na(isoform), gene %in% driver_genes)
+
+# Count mutations per isoform
+mutation_profile <- mutations_with_isoform %>%
+  group_by(isoform, gene) %>%
+  summarise(
+    mutation_count = n(),
+    .groups = 'drop'
+  ) %>%
+  pivot_wider(
+    names_from = gene,
+    values_from = mutation_count,
+    values_fill = 0
+  )
+
+log_message("Mutation profile by APOE isoform (driver genes):")
+print(mutation_profile)
+
+# ============================================================================
+# 8. Statistical Tests
+# ============================================================================
+log_message("Performing statistical tests...")
+
+# ANOVA for TMB differences
+tmb_anova <- aov(tmb ~ isoform, data = tmb_data)
+tmb_pval <- summary(tmb_anova)[[1]][1, 'Pr(>F)']
+
+log_message(paste("TMB ANOVA p-value:", round(tmb_pval, 4)))
+
+if (tmb_pval < 0.05) {
+  log_message("✓ Significant difference in TMB between APOE isoforms (p < 0.05)")
+} else {
+  log_message("✗ No significant difference in TMB between APOE isoforms")
+}
+
+# ============================================================================
+# 9. Save Results
+# ============================================================================
+log_message("Saving mutation analysis results...")
+
+dir.create('results/tables', showWarnings = FALSE, recursive = TRUE)
+
+# Save TMB data
+fwrite(
+  as.data.table(tmb_data),
+  'results/tables/tmb_by_sample.csv'
+)
+
+# Save TMB summary
+fwrite(
+  as.data.table(tmb_summary),
+  'results/tables/tmb_summary_by_isoform.csv'
+)
+
+# Save recurrent mutations
+fwrite(
+  as.data.table(recurrent_mutations),
+  'results/tables/recurrent_mutations.csv'
+)
+
+# Save driver gene mutations
+fwrite(
+  as.data.table(driver_mutations),
+  'results/tables/driver_gene_mutations.csv'
+)
+
+# Save mutation profile
+fwrite(
+  as.data.table(mutation_profile),
+  'results/tables/mutation_profile_by_isoform.csv'
+)
+
+log_message("Results saved to results/tables/")
+
+log_message("=== Mutation Analysis Complete ===")
+
+cat("\n✓ Mutation analysis complete!\n")
