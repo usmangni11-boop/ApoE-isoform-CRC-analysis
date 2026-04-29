@@ -1,0 +1,110 @@
+# ============================================================
+# params.yaml — Centralized Configuration
+# ApoE Isoform CRC Analysis Pipeline
+# ============================================================
+
+# --- TCGA Project IDs ---
+tcga_project:
+  - "TCGA-COAD"
+  - "TCGA-READ"
+
+# --- APOE Isoform Classification ---
+apoe_snps:
+  rs429358: "19:44908684"    # C/T — defines ε4 allele
+  rs7412:   "19:44908822"    # C/T — defines ε2 allele
+
+isoform_map:
+  # Haplotype combinations → isoform labels
+  # rs429358_ref = T, rs429358_alt = C
+  # rs7412_ref   = C, rs7412_alt   = T
+  "T/T_T/T": "e2/e3"
+  "T/T_C/C": "e2/e2"
+  "T/T_C/T": "e2/e3"
+  "C/T_C/C": "e2/e4"
+  "C/T_C/T": "e3/e4"
+  "C/C_C/C": "e4/e4"
+  "T/T_T/T_ref": "e3/e3"
+
+isoform_groups:
+  e2_carrier: ["e2/e2", "e2/e3", "e2/e4"]
+  e3_homozygous: ["e3/e3"]
+  e4_carrier: ["e3/e4", "e4/e4"]
+
+# --- Differential Expression ---
+deg_thresholds:
+  padj: 0.05
+  log2fc: 1.0
+  method: "DESeq2"          # Options: "DESeq2", "limma-voom"
+  min_counts: 10            # Minimum read count filter
+
+# --- Immune Infiltration ---
+immune:
+  methods:
+    - "CIBERSORT"
+    - "TIMER"
+    - "xCell"
+  cell_types:
+    - "CD8+ T cells"
+    - "CD4+ T cells"
+    - "Macrophages M1"
+    - "Macrophages M2"
+    - "B cells"
+    - "NK cells"
+    - "Dendritic cells"
+  cibersort:
+    perm: 1000              # Number of permutations
+    qn: true                # Quantile normalization
+
+# --- Mutation Analysis ---
+mutation:
+  min_recurrence: 5         # Minimum samples with mutation
+  tmb_unit: "per_Mb"        # TMB normalization
+  top_genes: 20             # Top mutated genes in oncoplot
+  maf_source: "mutect2"     # Variant caller
+
+# --- Pathway Enrichment ---
+pathway:
+  gene_sets: "h.all.v2024.1.Hs.symbols.gmt"   # MSigDB Hallmark set
+  method: "gsea"            # Options: "gsea", "ssgsea", "gsva"
+  min_gene_set_size: 15
+  max_gene_set_size: 500
+  fdr_threshold: 0.25
+  nperm: 1000
+
+# --- Survival Analysis ---
+survival:
+  endpoints:
+    - name: "OS"
+      time_col: "OS.time"
+      event_col: "OS"
+    - name: "DFS"
+      time_col: "DFS.time"
+      event_col: "DFS"
+  cox_covariates:
+    - "age_at_diagnosis"
+    - "gender"
+    - "stage"
+    - "msi_status"
+  km_pvalue_method: "log-rank"
+  confidence_level: 0.95
+
+# --- Figure Settings ---
+figures:
+  format: "pdf"             # Options: "pdf", "png", "svg"
+  dpi: 300
+  width: 8                  # inches
+  height: 6                 # inches
+  color_palette:
+    e2: "#2196F3"           # Blue
+    e3: "#4CAF50"           # Green
+    e4: "#F44336"           # Red
+  theme: "classic"          # ggplot2 theme
+
+# --- File Paths ---
+paths:
+  raw_data: "data/raw/"
+  processed_data: "data/processed/"
+  external_data: "data/external/"
+  results_tables: "results/tables/"
+  results_figures: "results/figures/"
+  results_reports: "results/reports/"
