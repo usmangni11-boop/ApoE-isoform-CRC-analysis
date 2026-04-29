@@ -1,0 +1,74 @@
+# ============================================================
+# .gitignore — ApoE Isoform CRC Analysis
+# R + Python bioinformatics project
+# ============================================================
+
+# ----- Raw & large data (download via pipeline) -----
+data/raw/
+*.h5
+*.hdf5
+*.rds
+*.RData
+*.rda
+*.gz
+*.tar.gz
+*.zip
+*.bam
+*.bai
+*.vcf
+*.maf
+
+# ----- R -----
+.Rhistory
+.Rapp.history
+.RData
+.Ruserdata
+.Rproj.user/
+*.Rproj
+.Renviron
+renv/library/
+renv/staging/
+renv/python/
+renv/sandbox/
+
+# ----- Python -----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+.env
+
+# ----- Jupyter Notebooks -----
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ----- IDE & Editors -----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ----- Results (regenerate via pipeline) -----
+results/figures/*.png
+results/figures/*.pdf
+results/reports/*.html
+
+# ----- CIBERSORT (proprietary, do not distribute) -----
+scripts/CIBERSORT.R
+data/external/LM22.txt
+
+# ----- Misc -----
+*.log
+*.tmp
+*.bak
+.cache/
